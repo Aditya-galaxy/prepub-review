@@ -31,8 +31,11 @@ jobs:
         # in production.
         env:
           DJANGO_DEBUG: "false"
-          DJANGO_SECRET_KEY: ci-only-ephemeral-key-not-used-to-serve-anything
-        run: python manage.py check --deploy --fail-level WARNING
+        run: |
+          # Generated per run rather than hardcoded: a short literal would trip W009, and a
+          # long one in the repo invites being copied into something that matters.
+          export DJANGO_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(64))")
+          python manage.py check --deploy --fail-level WARNING
 
       - name: Check for missing migrations
         # Catches a model edited without `makemigrations`, which otherwise only shows up as a
