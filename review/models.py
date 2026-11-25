@@ -202,6 +202,8 @@ class AccessRecord(models.Model):
         PUBLIC = "public", "Public entry, no token required"
         GRANTED = "granted", "Granted on a valid token"
         GRANTED_DEPOSITOR = "granted_depositor", "Granted to the signed-in depositor"
+        DEPOSITED = "deposited", "New deposition accepted"
+        RELEASED = "released", "Embargo lifted by the depositor"
         DENIED_NO_TOKEN = "denied_no_token", "Embargoed, no token presented"
         DENIED_UNKNOWN = "denied_unknown_token", "Token not recognised"
         DENIED_EXPIRED = "denied_expired", "Token expired"
@@ -209,6 +211,8 @@ class AccessRecord(models.Model):
         DENIED_EXHAUSTED = "denied_exhausted", "Token access limit reached"
         DENIED_WRONG_ENTRY = "denied_wrong_entry", "Token valid for a different entry"
         DENIED_NOT_DEPOSITOR = "denied_not_depositor", "Signed in, but not this depositor"
+        DENIED_NOT_AUTHOR = "denied_not_author", "Not an author of the file they uploaded"
+        DENIED_BAD_UPLOAD = "denied_bad_upload", "Upload rejected"
         NOT_FOUND = "not_found", "No such entry"
 
     occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)

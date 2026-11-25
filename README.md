@@ -26,6 +26,7 @@ presenting a token that was issued for that exact entry, and only while the toke
 | Embargoed entry, its depositor signed in with ORCID | 200 |
 | Embargoed entry, a *different* depositor signed in | **404** |
 | Embargoed entry in the public list | never, for anyone |
+| Depositing, releasing, or anything else with a session cookie | CSRF token required |
 
 **The 404 is deliberate and is the most important decision here.** A 403 would confirm that the
 accession exists and is under embargo, and that is itself information about unpublished work: it
@@ -84,6 +85,8 @@ to a `postgresql://` URL and the same code uses PostgreSQL.
 | `GET /api/depositions/<accession>/coordinates/` | The coordinate file, same check applied again. |
 | `GET /api/session/` | What the presented token opens, when it expires, accesses left. |
 | `GET /api/mine/` | The signed-in depositor's own entries, embargoed included. |
+| `POST /api/deposit/` | Upload an mmCIF file and a release date. |
+| `POST /api/depositions/<accession>/release/` | Lift your own embargo early. |
 | `GET /auth/orcid/login/` \| `/callback/` \| `/logout/` | The ORCID sign-in flow. |
 
 Credentials go in `Authorization: Review <token>`.
@@ -95,6 +98,44 @@ curl -H "Authorization: Review $TOKEN" http://127.0.0.1:8000/api/depositions/11C
 **Tokens are issued through the admin and the `issue_token` command, not through this API.** Keeping
 the issuing path off the reviewer-facing surface means a flaw in the read path cannot be turned
 into a way to mint access.
+
+## Depositing
+
+A depositor signs in, uploads an mmCIF file, and chooses when the embargo ends. That is the whole
+form: `review/serializers.py` takes a file and a date and nothing else.
+
+```
+sign in with ORCID -> upload mmCIF -> embargoed -> issue a review token
+                   -> reviewer reads that one entry -> release
+```
+
+Three rules make it safe, and they are the reason the form is that short.
+
+**The record is built from the file, never typed alongside it.** Accession, title, method and
+resolution are read out of the header, so the record and the file cannot disagree at the moment
+the record is created. Verification then only has to catch a later re-upload.
+
+**The uploader has to be named in the file**, matched on ORCID iD against
+`_audit_author.identifier_ORCID`. If the file records no ORCID iD for any author, the upload is
+refused rather than waved through: authorship cannot be established from a name, and a deposition
+system that accepts "trust me" at this point has no access control worth the name. Real archives
+have other evidence available to them; this service does not, and says so instead of pretending.
+
+**The release date has to be in the future.** A release date of today is not an embargo, it is a
+public deposition, so it is rejected rather than quietly accepted.
+
+A duplicate accession is refused rather than overwritten, because overwriting would destroy the
+file a reviewer may be part-way through reading. Replacing a deposition is versioning, which this
+service does not do.
+
+A depositor can lift their own embargo early, which is the only way an entry becomes public other
+than its date arriving. Someone else's entry returns the same 404 as everywhere else.
+
+**One detail worth naming: `csrf_protect` is applied explicitly.** DRF marks `APIView`
+`csrf_exempt`, and a depositor here is identified by a session cookie, so without it any site
+could make a signed-in depositor deposit a file or lift their own embargo. The page sets the
+cookie with `ensure_csrf_cookie` so the first upload of a session is not refused for want of a
+token that was never issued.
 
 ## Two principals, two mechanisms
 
@@ -215,11 +256,14 @@ the same count and overshoot the limit.
 .venv/bin/python manage.py test review
 ```
 
-68 tests, covering the embargo table above, the token lifecycle (expiry, revocation, access
+88 tests, covering the embargo table above, the token lifecycle (expiry, revocation, access
 limits, unknown tokens), the ORCID check digit, and the audit trail: that refusals are recorded,
 that the plaintext token never reaches the database, that the client address is not stored in
 clear, that records cannot be modified or deleted either one at a time or in bulk, and that the trail
-survives deletion of the token it refers to. The ORCID tests sign a real RS256 `id_token` with a throwaway key and check that a wrong
+survives deletion of the token it refers to. The deposit tests cover the three rules above plus the refusals: a non-author, a file naming
+no ORCID iD, a past or same-day release date, a duplicate accession, an unparseable or
+non-text file, an oversized one, and a request without a CSRF token. The ORCID tests sign a
+real RS256 `id_token` with a throwaway key and check that a wrong
 subject, a wrong nonce, a wrong audience, a mismatched `state` and a replayed callback are
 each refused, and that signing in opens your own embargoed entry and not anyone else's. The
 mmCIF tests use a hand-written fragment,
@@ -231,9 +275,13 @@ gets deleted by the next person who sees it fail.
 
 ## Limits
 
-This is a working model of one mechanism, not a deposition system. It has no upload path and no
-versioning of depositions, and the header check compares metadata rather than validating the
-coordinates themselves, which is a much larger job. Real
+This is a working model, not a deposition system. The loop runs end to end, but there is no
+curation workflow and no versioning: a deposition cannot be replaced, corrected or superseded,
+and nobody reviews it between deposit and release. The header check compares metadata rather
+than validating the coordinates themselves, which is a much larger job.
+
+Authorship is established only from ORCID iDs in the file, so a file whose authors recorded
+none cannot be deposited here at all. That is the safe failure, not a good one. Real
 pre-publication access at the wwPDB is coordinated across several independent sites, and nothing
 here addresses that.
 

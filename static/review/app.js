@@ -16,6 +16,13 @@
     });
   }
 
+  function cookie(name) {
+    var hit = document.cookie.split("; ").find(function (row) {
+      return row.indexOf(name + "=") === 0;
+    });
+    return hit ? decodeURIComponent(hit.slice(name.length + 1)) : null;
+  }
+
   function request(path) {
     var headers = {};
     if (token) { headers.Authorization = "Review " + token; }
@@ -130,17 +137,73 @@
         if (entries === null) { return; }
         el("signin-actions").innerHTML =
           '<a class="button-link secondary" href="/auth/orcid/logout/">Sign out</a>';
+        el("deposit-form").hidden = false;
         var rows = entries.results || entries;
         el("mine-list").innerHTML = rows.length
           ? rows.map(function (entry) {
-              var tag = entry.embargoed ? ' <span class="tag">embargoed</span>' : "";
+              var tag = entry.embargoed
+                ? ' <span class="tag">embargoed</span>'
+                  + ' <button type="button" class="row-action" data-release="'
+                  + escapeHtml(entry.accession) + '">Release now</button>'
+                : "";
               return "<li><code>" + escapeHtml(entry.accession) + "</code> &mdash; "
                 + escapeHtml(entry.title) + tag + "</li>";
             }).join("")
           : "<li>No depositions.</li>";
+        Array.prototype.forEach.call(
+          document.querySelectorAll("[data-release]"), function (button) {
+            button.addEventListener("click", function () {
+              releaseEntry(button.getAttribute("data-release"));
+            });
+          });
       })
       .catch(function (err) { show(el("signin-note"), escapeHtml(err.message)); });
   }
+
+  function releaseEntry(accession) {
+    if (!window.confirm("Release " + accession + " now? This cannot be undone, and the entry "
+        + "becomes public immediately.")) { return; }
+    fetch("/api/depositions/" + encodeURIComponent(accession) + "/release/", {
+      method: "POST",
+      headers: { "X-CSRFToken": cookie("csrftoken") || "" }
+    })
+      .then(function (response) {
+        if (!response.ok) { throw new Error("Release refused (" + response.status + ")"); }
+        show(el("deposit-note"), escapeHtml(accession + " is now public."));
+        loadMine();
+      })
+      .catch(function (err) { show(el("deposit-note"), escapeHtml(err.message)); });
+  }
+
+  el("deposit-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    hide(el("deposit-note"));
+    var body = new FormData();
+    body.append("coordinates", el("coordinates").files[0]);
+    body.append("release_on", el("release_on").value);
+    fetch("/api/deposit/", {
+      method: "POST",
+      headers: { "X-CSRFToken": cookie("csrftoken") || "" },
+      body: body
+    })
+      .then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (payload) {
+          if (!response.ok) {
+            var detail = payload.coordinates || payload.release_on || payload.detail
+              || "Deposit refused";
+            throw new Error([].concat(detail).join(" "));
+          }
+          return payload;
+        });
+      })
+      .then(function (entry) {
+        show(el("deposit-note"),
+          escapeHtml(entry.accession + " deposited, embargoed until " + entry.release_on + "."));
+        el("deposit-form").reset();
+        loadMine();
+      })
+      .catch(function (err) { show(el("deposit-note"), escapeHtml(err.message)); });
+  });
 
   showSigninNote();
   loadMine();

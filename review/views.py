@@ -13,14 +13,17 @@ import logging
 
 from django.http import FileResponse
 from django.shortcuts import redirect
+from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET
-from rest_framework import exceptions, generics, views
+from rest_framework import exceptions, generics, parsers, status, views
 from rest_framework.response import Response
 
-from . import audit, orcid_oauth
+from . import audit, deposit, orcid_oauth
 from .depositors import signed_in_depositor
 from .models import AccessRecord, Deposition
-from .serializers import DepositionSerializer, SessionSerializer
+from .serializers import DepositionSerializer, DepositUploadSerializer, SessionSerializer
 
 log = logging.getLogger(__name__)
 
@@ -185,3 +188,63 @@ def orcid_callback(request):
 def orcid_logout(request):
     request.session.flush()
     return redirect("/?signin=out")
+
+
+def _require_depositor(request):
+    depositor = signed_in_depositor(request)
+    if depositor is None:
+        audit.mark(request, outcome=AccessRecord.Outcome.DENIED_NO_TOKEN)
+        raise exceptions.NotAuthenticated("Sign in with ORCID first")
+    return depositor
+
+
+# csrf_protect is not decoration. DRF marks APIViews csrf_exempt, and a depositor here is
+# identified by a session cookie, so without this any site could make a signed-in depositor
+# deposit a file or lift their own embargo.
+@method_decorator(csrf_protect, name="dispatch")
+class DepositUpload(views.APIView):
+    """Accept a new deposition from one of its own authors."""
+
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser]
+
+    def post(self, request):
+        depositor = _require_depositor(request)
+        form = DepositUploadSerializer(data=request.data)
+        form.is_valid(raise_exception=True)
+        try:
+            deposition = deposit.create(form.validated_data["coordinates"], depositor,
+                                        form.validated_data["release_on"])
+        except deposit.DepositRejected as exc:
+            # The reason is shown here, unlike elsewhere in this service, because it is about the
+            # caller's own file and tells them nothing about anyone else's work.
+            outcome = (AccessRecord.Outcome.DENIED_NOT_AUTHOR if "ORCID" in str(exc)
+                       else AccessRecord.Outcome.DENIED_BAD_UPLOAD)
+            audit.mark(request, outcome=outcome)
+            raise exceptions.ValidationError({"coordinates": str(exc)}) from exc
+
+        audit.mark(request, accession=deposition.accession,
+                   outcome=AccessRecord.Outcome.DEPOSITED)
+        return Response(DepositionSerializer(deposition).data, status=status.HTTP_201_CREATED)
+
+
+@method_decorator(csrf_protect, name="dispatch")
+class ReleaseNow(views.APIView):
+    """Let a depositor lift their own embargo early, which closes the loop."""
+
+    def post(self, request, accession):
+        depositor = _require_depositor(request)
+        accession = accession.strip().upper()
+        audit.mark(request, accession=accession)
+        deposition = Deposition.objects.filter(accession=accession).first()
+        if deposition is None or deposition.depositor_id != depositor.pk:
+            # Same 404 as everywhere else: not yours is indistinguishable from not there.
+            audit.mark(request, outcome=AccessRecord.Outcome.DENIED_NOT_DEPOSITOR)
+            raise exceptions.NotFound("No such entry")
+        if not deposition.is_embargoed():
+            audit.mark(request, outcome=AccessRecord.Outcome.PUBLIC)
+            return Response(DepositionSerializer(deposition).data)
+
+        deposition.release_on = timezone.localdate()
+        deposition.save(update_fields=["release_on"])
+        audit.mark(request, outcome=AccessRecord.Outcome.RELEASED)
+        return Response(DepositionSerializer(deposition).data)

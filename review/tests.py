@@ -624,3 +624,174 @@ class DepositorAccessTests(EmbargoBase):
             response = self.client.get("/auth/orcid/callback/?code=x&state=y")
         self.assertIn("signin=failed", response.url)
         self.assertNotIn("state", response.url)
+
+
+# Another hand-written fragment, not a real entry. Its author iD matches DEPOSITOR_ORCID so the
+# authorship check can pass, and its accession does not collide with the seeded ones.
+UPLOAD_CIF = """data_7NEW
+#
+_entry.id   7NEW
+_struct.title   'A newly deposited structure'
+_exptl.method   'X-RAY DIFFRACTION'
+_refine.ls_d_res_high   1.95
+#
+loop_
+_audit_author.name
+_audit_author.identifier_ORCID
+'Smith, J.'   %s
+#
+""" % DEPOSITOR_ORCID
+
+
+@override_settings(**ORCID_SETTINGS)
+class DepositUploadTests(EmbargoBase):
+    """Accepting a deposition from its own author."""
+
+    def sign_in(self, orcid=DEPOSITOR_ORCID):
+        from .orcid_oauth import SESSION_ORCID
+        session = self.client.session
+        session[SESSION_ORCID] = orcid
+        session.save()
+
+    def upload(self, text=UPLOAD_CIF, release_in_days=90, name="upload.cif", client=None):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        payload = text if isinstance(text, bytes) else text.encode()
+        return (client or self.client).post("/api/deposit/", {
+            "coordinates": SimpleUploadedFile(name, payload),
+            "release_on": (timezone.localdate() + timedelta(days=release_in_days)).isoformat(),
+        })
+
+    def test_upload_requires_signing_in(self):
+        self.assertEqual(self.upload().status_code, 401)
+
+    def test_a_valid_upload_is_accepted(self):
+        self.sign_in()
+        response = self.upload()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["accession"], "7NEW")
+
+    def test_the_record_is_built_from_the_file_not_from_the_request(self):
+        """The depositor chooses the release date and nothing else, so the two cannot disagree."""
+        self.sign_in()
+        self.upload()
+        created = Deposition.objects.get(accession="7NEW")
+        self.assertEqual(created.title, "A newly deposited structure")
+        self.assertEqual(created.method, Deposition.Method.XRAY)
+        self.assertEqual(created.resolution, 1.95)
+        self.assertEqual(created.depositor, self.depositor)
+        self.assertEqual(created.verify_coordinates(), [])
+
+    def test_an_uploader_who_is_not_an_author_is_refused(self):
+        """The check that stops a depositor claiming someone else's structure."""
+        other = Depositor.objects.create(name="Someone Else", orcid=OTHER_ORCID)
+        self.sign_in(orcid=other.orcid)
+        response = self.upload()
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Deposition.objects.filter(accession="7NEW").exists())
+        self.assertEqual(AccessRecord.objects.first().outcome,
+                         AccessRecord.Outcome.DENIED_NOT_AUTHOR)
+
+    def test_a_file_naming_no_orcid_at_all_is_refused(self):
+        """Authorship cannot be established from a name, so we do not pretend otherwise."""
+        self.sign_in()
+        response = self.upload(UPLOAD_CIF.replace(DEPOSITOR_ORCID, "?"))
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Deposition.objects.filter(accession="7NEW").exists())
+
+    def test_a_release_date_in_the_past_is_refused(self):
+        self.sign_in()
+        self.assertEqual(self.upload(release_in_days=-1).status_code, 400)
+
+    def test_a_release_date_of_today_is_refused(self):
+        """Releasing today is not an embargo, it is a public deposition."""
+        self.sign_in()
+        self.assertEqual(self.upload(release_in_days=0).status_code, 400)
+
+    def test_a_duplicate_accession_is_refused_rather_than_overwritten(self):
+        """Overwriting would lose the file a reviewer may already be reading."""
+        self.sign_in()
+        self.assertEqual(self.upload().status_code, 201)
+        self.assertEqual(self.upload().status_code, 400)
+        self.assertEqual(Deposition.objects.filter(accession="7NEW").count(), 1)
+
+    def test_a_file_that_is_not_mmcif_is_refused(self):
+        self.sign_in()
+        self.assertEqual(self.upload("this is not a structure").status_code, 400)
+
+    def test_a_file_with_no_entry_id_is_refused(self):
+        self.sign_in()
+        self.assertEqual(self.upload(UPLOAD_CIF.replace("_entry.id   7NEW", "")).status_code, 400)
+
+    def test_a_file_that_is_not_text_is_refused(self):
+        self.sign_in()
+        self.assertEqual(self.upload(b"\xff\xfe\x00binary").status_code, 400)
+
+    @override_settings(MAX_UPLOAD_BYTES=64)
+    def test_an_oversized_file_is_refused(self):
+        """An upload endpoint with no ceiling is a way to fill the disk."""
+        self.sign_in()
+        self.assertEqual(self.upload().status_code, 400)
+
+    def test_a_new_deposition_is_embargoed_and_invisible_to_the_public(self):
+        self.sign_in()
+        self.upload()
+        self.client.logout()
+        self.assertEqual(self.get("/api/depositions/7NEW/").status_code, 404)
+        self.assertNotIn("7NEW", [r["accession"] for r in self.get("/api/depositions/").json()])
+
+    def test_the_deposit_is_recorded(self):
+        self.sign_in()
+        self.upload()
+        record = AccessRecord.objects.first()
+        self.assertEqual(record.outcome, AccessRecord.Outcome.DEPOSITED)
+        self.assertEqual(record.accession, "7NEW")
+
+    def test_csrf_is_enforced_on_upload(self):
+        """DRF marks APIViews csrf_exempt, and a depositor here is a session cookie. Without
+        csrf_protect any site could make a signed-in depositor deposit a file."""
+        from django.test import Client
+        strict = Client(enforce_csrf_checks=True)
+        session = strict.session
+        from .orcid_oauth import SESSION_ORCID
+        session[SESSION_ORCID] = DEPOSITOR_ORCID
+        session.save()
+        self.assertEqual(self.upload(client=strict).status_code, 403)
+
+
+@override_settings(**ORCID_SETTINGS)
+class ReleaseTests(EmbargoBase):
+    """Lifting an embargo early, which closes the deposit-review-release loop."""
+
+    def sign_in(self, orcid=DEPOSITOR_ORCID):
+        from .orcid_oauth import SESSION_ORCID
+        session = self.client.session
+        session[SESSION_ORCID] = orcid
+        session.save()
+
+    def test_a_depositor_can_release_their_own_entry(self):
+        self.sign_in()
+        self.assertEqual(self.client.post("/api/depositions/9XYZ/release/").status_code, 200)
+        self.embargoed.refresh_from_db()
+        self.assertFalse(self.embargoed.is_embargoed())
+
+    def test_releasing_makes_it_public_without_a_token(self):
+        self.sign_in()
+        self.client.post("/api/depositions/9XYZ/release/")
+        self.client.logout()
+        self.assertEqual(self.get("/api/depositions/9XYZ/").status_code, 200)
+        self.assertIn("9XYZ", [r["accession"] for r in self.get("/api/depositions/").json()])
+
+    def test_release_is_recorded(self):
+        self.sign_in()
+        self.client.post("/api/depositions/9XYZ/release/")
+        self.assertEqual(AccessRecord.objects.first().outcome, AccessRecord.Outcome.RELEASED)
+
+    def test_someone_elses_entry_cannot_be_released(self):
+        other = Depositor.objects.create(name="Someone Else", orcid=OTHER_ORCID)
+        self.sign_in(orcid=other.orcid)
+        self.assertEqual(self.client.post("/api/depositions/9XYZ/release/").status_code, 404)
+        self.embargoed.refresh_from_db()
+        self.assertTrue(self.embargoed.is_embargoed())
+
+    def test_release_requires_signing_in(self):
+        self.assertEqual(self.client.post("/api/depositions/9XYZ/release/").status_code, 401)

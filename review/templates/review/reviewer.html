@@ -42,6 +42,21 @@
     <p id="signin-actions">
       <a class="button-link" href="/auth/orcid/login/">Sign in with ORCID</a>
     </p>
+
+    <form id="deposit-form" autocomplete="off" hidden>
+      <label for="coordinates">Coordinate file (mmCIF)</label>
+      <input type="file" id="coordinates" name="coordinates" accept=".cif,.mmcif,text/plain" required>
+      <p class="help">
+        The entry id, title, method and resolution are read from the file. You must be named in
+        it as an author, matched on your ORCID iD.
+      </p>
+      <label for="release_on">Release date</label>
+      <input type="date" id="release_on" name="release_on" required>
+      <p class="help">Must be in the future. Until then the entry is reachable only by token.</p>
+      <button type="submit">Deposit</button>
+    </form>
+    <div id="deposit-note" class="panel" hidden></div>
+
     <ul id="mine-list"></ul>
   </section>
 

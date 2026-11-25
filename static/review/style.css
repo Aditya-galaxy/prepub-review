@@ -35,6 +35,16 @@ h2 { font-size: 1.05rem; margin: 2.2rem 0 .6rem; }
 .lede { color: var(--muted); margin: 0 0 1rem; }
 .help { color: var(--muted); font-size: .875rem; margin: .35rem 0; }
 label { display: block; font-weight: 600; font-size: .875rem; margin-bottom: .3rem; }
+input[type="file"], input[type="date"] {
+  width: 100%; padding: .5rem .6rem; font: inherit; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+}
+input[type="date"] { color-scheme: light dark; }
+.row-action {
+  margin-left: .5rem; padding: .1rem .5rem; font: inherit; font-size: .78rem;
+  color: var(--accent); background: transparent; border: 1px solid var(--line);
+  border-radius: 4px; cursor: pointer;
+}
 input[type="password"] {
   width: 100%; padding: .6rem .7rem; font: inherit; color: var(--ink);
   background: var(--panel); border: 1px solid var(--line); border-radius: 6px;

@@ -27,6 +27,10 @@ CLIENT_SALT = os.environ.get("PREPUB_CLIENT_SALT", "dev-only-client-salt")
 
 # ORCID sign-in for depositors. The default is the SANDBOX: pointing this at the real registry
 # has to be a deliberate act, not something that happens because a variable was forgotten.
+# A cryo-EM entry can run to tens of megabytes, so the ceiling is generous, but it exists:
+# an upload endpoint with no limit is a way to fill the disk.
+MAX_UPLOAD_BYTES = int(os.environ.get("PREPUB_MAX_UPLOAD_BYTES", 50 * 1024 * 1024))
+
 ORCID_BASE = os.environ.get("ORCID_BASE", "https://sandbox.orcid.org")
 ORCID_CLIENT_ID = os.environ.get("ORCID_CLIENT_ID", "")
 ORCID_CLIENT_SECRET = os.environ.get("ORCID_CLIENT_SECRET", "")
