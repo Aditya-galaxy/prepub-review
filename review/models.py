@@ -83,6 +83,20 @@ class Deposition(models.Model):
     def is_embargoed(self, on=None):
         return (on or timezone.localdate()) < self.release_on
 
+    def verify_coordinates(self):
+        """Check the uploaded file's header against this record.
+
+        Returns a list of (field, in_record, in_file). Empty means they agree. Raises
+        FileNotFoundError when there is no file to check, because "no file" and "a file that
+        agrees" are different answers and a caller should not confuse them.
+        """
+        from . import mmcif
+        if not self.coordinates:
+            raise FileNotFoundError(f"{self.accession} has no coordinate file")
+        with self.coordinates.open("rb") as fh:
+            text = fh.read().decode("utf-8", "replace")
+        return mmcif.discrepancies(self, text)
+
     def __str__(self):
         return f"{self.accession}: {self.title[:60]}"
 

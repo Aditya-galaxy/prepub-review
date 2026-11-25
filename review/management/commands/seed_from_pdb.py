@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from datetime import timedelta
 
+from django.core.files.base import ContentFile
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
@@ -24,6 +25,7 @@ from review.orcid import InvalidORCID, normalise
 
 SEARCH_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
 ENTRY_URL = "https://data.rcsb.org/rest/v1/core/entry/{pdb_id}"
+FILE_URL = "https://files.rcsb.org/download/{pdb_id}.cif"
 USER_AGENT = "prepub-review/0.1 (student project; contact via repository)"
 
 # Recorded here, and copied into the manifest, so the set can be rebuilt exactly.
@@ -82,6 +84,10 @@ class Command(BaseCommand):
         parser.add_argument("--embargo", type=int, default=4,
                             help="how many of them to place under a simulated embargo")
         parser.add_argument("--seed", type=int, default=0, help="sampling seed")
+        parser.add_argument("--with-files", action="store_true",
+                            help="also download the real mmCIF coordinate files")
+        parser.add_argument("--max-file-mb", type=float, default=12.0,
+                            help="skip files larger than this; some cryo-EM entries are large")
         parser.add_argument("--manifest", default="seed_manifest.json")
 
     def handle(self, *args, **opts):
@@ -130,6 +136,8 @@ class Command(BaseCommand):
                     "release_on": released,
                     "embargo_simulated": False,
                 })
+            if opts["with_files"]:
+                self._attach_file(deposition, opts["max_file_mb"])
             loaded.append(deposition)
 
         if not loaded:
@@ -159,6 +167,30 @@ class Command(BaseCommand):
         if skipped:
             self.stdout.write(f"skipped {len(skipped)}: {skipped}")
         self.stdout.write(f"manifest written to {opts['manifest']}")
+
+    def _attach_file(self, deposition, max_mb):
+        """Download the real mmCIF file so the header check runs against archive data."""
+        if deposition.coordinates:
+            return
+        url = FILE_URL.format(pdb_id=deposition.accession)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=120) as fh:
+                declared = fh.headers.get("Content-Length")
+                if declared and int(declared) > max_mb * 1024 * 1024:
+                    self.stdout.write(f"  {deposition.accession}: file larger than "
+                                      f"{max_mb} MB, skipped")
+                    return
+                payload = fh.read(int(max_mb * 1024 * 1024) + 1)
+        except Exception as exc:                               # noqa: BLE001
+            self.stdout.write(f"  {deposition.accession}: file download failed "
+                              f"({type(exc).__name__})")
+            return
+        if len(payload) > max_mb * 1024 * 1024:
+            self.stdout.write(f"  {deposition.accession}: file larger than {max_mb} MB, skipped")
+            return
+        deposition.coordinates.save(f"{deposition.accession}.cif",
+                                    ContentFile(payload), save=True)
 
     @staticmethod
     def _depositor(entry):

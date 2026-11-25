@@ -92,6 +92,35 @@ curl -H "Authorization: Review $TOKEN" http://127.0.0.1:8000/api/depositions/11C
 the issuing path off the reviewer-facing surface means a flaw in the read path cannot be turned
 into a way to mint access.
 
+## Checking a file against its record
+
+A deposition system has to answer a curation question before release: does the uploaded file say
+what the record says? `review/mmcif.py` is a small mmCIF reader that pulls the entry id, title,
+experimental method, resolution and audit authors with their ORCID iDs, and
+`Deposition.verify_coordinates()` compares them.
+
+```bash
+.venv/bin/python manage.py seed_from_pdb --count 6 --embargo 2 --with-files
+.venv/bin/python manage.py check_coordinates
+```
+
+It is not a general CIF parser and does not claim to be. It handles what archive files actually
+contain: single and double quoted values, semicolon text fields, `loop_` constructs, the `.` and
+`?` placeholders, and comments. It does not handle save frames, multiple data blocks or CIF 2.0,
+which deposition files do not use. Three details are worth naming, because a parser that gets them
+wrong fails quietly rather than loudly:
+
+- A quote only closes a value when whitespace follows it, so `"O'Brien, S."` stays intact. A naive
+  split on the quote character turns that author into `O`.
+- A semicolon starts a text field only at the beginning of a line, so a semicolon inside a title
+  does not end the value early.
+- `.` and `?` mean "not applicable" and "unknown". They become `None`, never the strings.
+
+Checked against real archive files, including an 8 MB cryo-EM entry, where the resolution has to
+come from `_em_3d_reconstruction.resolution` because a cryo-EM entry has no `_refine` category at
+all. A mismatch is usually a re-uploaded wrong file or a title edited in one place and not the
+other, so the command reports the record and the file side by side rather than just failing.
+
 ## Design decisions worth defending
 
 **Tokens are stored as HMAC digests, never in clear.** A copy of the database must not hand its
@@ -141,19 +170,22 @@ the same count and overshoot the limit.
 .venv/bin/python manage.py test review
 ```
 
-31 tests, covering the embargo table above, the token lifecycle (expiry, revocation, access
+48 tests, covering the embargo table above, the token lifecycle (expiry, revocation, access
 limits, unknown tokens), the ORCID check digit, and the audit trail: that refusals are recorded,
 that the plaintext token never reaches the database, that the client address is not stored in
 clear, that records cannot be modified or deleted either one at a time or in bulk, and that the trail
-survives deletion of the token it refers to.
+survives deletion of the token it refers to. The mmCIF tests use a hand-written fragment,
+labelled as fake, that exercises the syntax quirks above, and check that each kind of
+record-versus-file mismatch is caught rather than only that a matching file passes.
 
 Each test names the rule it defends in its docstring, because a test whose purpose is not obvious
 gets deleted by the next person who sees it fail.
 
 ## Limits
 
-This is a working model of one mechanism, not a deposition system. It has no upload or curation
-path, no validation of the coordinate files themselves, and no versioning of depositions. Real
+This is a working model of one mechanism, not a deposition system. It has no upload path and no
+versioning of depositions, and the header check compares metadata rather than validating the
+coordinates themselves, which is a much larger job. Real
 pre-publication access at the wwPDB is coordinated across several independent sites, and nothing
 here addresses that.
 

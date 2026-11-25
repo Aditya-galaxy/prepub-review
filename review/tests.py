@@ -252,3 +252,143 @@ class AppendOnlyEnforcementTests(EmbargoBase):
         """The guard must not break the only write path the service needs."""
         self.get("/api/depositions/1ABC/")
         self.assertEqual(AccessRecord.objects.count(), 2)
+
+
+# A hand-written mmCIF fragment, not a real entry. It is deliberately fake so that no reader
+# mistakes it for archive data, and it exercises the syntax that real files actually contain:
+# a semicolon text field, an apostrophe inside a double-quoted value, a loop_ with placeholders,
+# and comments.
+SAMPLE_CIF = """data_9XYZ
+#
+_entry.id   9XYZ
+#
+_struct.title
+;Embargoed structure
+;
+#
+_exptl.method   'ELECTRON MICROSCOPY'      # not a refinement, so no _refine category
+_em_3d_reconstruction.resolution   3.40
+#
+loop_
+_audit_author.name
+_audit_author.pdbx_ordinal
+_audit_author.identifier_ORCID
+"O'Brien, S."   1   0000-0002-1694-233X
+'Jones, A.'     2   ?
+.               3   .
+#
+"""
+
+
+class MMCIFParsingTests(TestCase):
+    def test_reads_a_plain_item(self):
+        from .mmcif import header
+        self.assertEqual(header(SAMPLE_CIF).entry_id, "9XYZ")
+
+    def test_reads_a_semicolon_text_field(self):
+        """The only way mmCIF carries a multi-line value, and common in titles."""
+        from .mmcif import header
+        self.assertEqual(header(SAMPLE_CIF).title, "Embargoed structure")
+
+    def test_apostrophe_inside_a_double_quoted_value_does_not_truncate_it(self):
+        """A naive parser turns "O'Brien, S." into O, which silently corrupts an author list."""
+        from .mmcif import header
+        self.assertEqual(header(SAMPLE_CIF).authors[0]["name"], "O'Brien, S.")
+
+    def test_loop_placeholders_become_none_not_strings(self):
+        """`?` means unknown and `.` means not applicable. Neither is data."""
+        from .mmcif import header
+        authors = header(SAMPLE_CIF).authors
+        self.assertEqual(authors[0]["orcid"], "0000-0002-1694-233X")
+        self.assertIsNone(authors[1]["orcid"])
+        self.assertIsNone(authors[2]["name"])
+
+    def test_em_resolution_is_read_from_the_right_category(self):
+        """A cryo-EM entry has no _refine.ls_d_res_high; its resolution lives elsewhere."""
+        from .mmcif import header
+        self.assertEqual(header(SAMPLE_CIF).resolution, 3.40)
+
+    def test_comments_are_ignored(self):
+        from .mmcif import header
+        self.assertEqual(header(SAMPLE_CIF).method, "ELECTRON MICROSCOPY")
+
+    def test_unterminated_quote_is_an_error_not_a_silent_truncation(self):
+        from .mmcif import MMCIFError, header
+        with self.assertRaises(MMCIFError):
+            header("data_X\n_struct.title   'never closed\n")
+
+    def test_unterminated_semicolon_field_is_an_error(self):
+        from .mmcif import MMCIFError, header
+        with self.assertRaises(MMCIFError):
+            header("data_X\n_struct.title\n;runs off the end\n")
+
+    def test_a_file_that_is_not_mmcif_is_rejected(self):
+        from .mmcif import MMCIFError, header
+        with self.assertRaises(MMCIFError):
+            header("just some text\n")
+
+
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix="prepub-cif-"))
+class CoordinateVerificationTests(TestCase):
+    """The curation question: does the uploaded file say what the record says?"""
+
+    @classmethod
+    def tearDownClass(cls):
+        from django.conf import settings
+        shutil.rmtree(settings.MEDIA_ROOT, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.depositor = Depositor.objects.create(name="O'Brien, S.",
+                                                  orcid="0000-0002-1694-233X")
+        today = timezone.localdate()
+        self.deposition = Deposition.objects.create(
+            accession="9XYZ", title="Embargoed structure", depositor=self.depositor,
+            method=Deposition.Method.EM, resolution=3.40,
+            deposited_on=today, release_on=today + timedelta(days=90))
+
+    def attach(self, text=SAMPLE_CIF):
+        self.deposition.coordinates.save("9XYZ.cif", ContentFile(text.encode()), save=True)
+
+    def test_matching_file_reports_nothing(self):
+        self.attach()
+        self.assertEqual(self.deposition.verify_coordinates(), [])
+
+    def test_wrong_accession_is_caught(self):
+        """The commonest real mistake: the wrong file uploaded against a record."""
+        self.attach(SAMPLE_CIF.replace("_entry.id   9XYZ", "_entry.id   1ABC"))
+        fields = [row[0] for row in self.deposition.verify_coordinates()]
+        self.assertIn("accession", fields)
+
+    def test_changed_title_is_caught(self):
+        self.attach(SAMPLE_CIF.replace("Embargoed structure", "A quite different structure"))
+        fields = [row[0] for row in self.deposition.verify_coordinates()]
+        self.assertIn("title", fields)
+
+    def test_changed_method_is_caught(self):
+        self.attach(SAMPLE_CIF.replace("'ELECTRON MICROSCOPY'", "'SOLUTION NMR'"))
+        fields = [row[0] for row in self.deposition.verify_coordinates()]
+        self.assertIn("method", fields)
+
+    def test_resolution_tolerance_allows_rounding_but_not_a_real_change(self):
+        self.attach(SAMPLE_CIF.replace("3.40", "3.42"))
+        self.assertEqual(self.deposition.verify_coordinates(), [])
+        self.deposition.coordinates.delete(save=True)
+        self.attach(SAMPLE_CIF.replace("3.40", "2.10"))
+        fields = [row[0] for row in self.deposition.verify_coordinates()]
+        self.assertIn("resolution", fields)
+
+    def test_depositor_orcid_missing_from_the_file_is_caught(self):
+        self.attach(SAMPLE_CIF.replace("0000-0002-1694-233X", "0000-0003-1567-1643"))
+        fields = [row[0] for row in self.deposition.verify_coordinates()]
+        self.assertIn("depositor ORCID", fields)
+
+    def test_whitespace_differences_are_not_discrepancies(self):
+        """A title rewrapped across lines is the same title."""
+        self.attach(SAMPLE_CIF.replace(";Embargoed structure\n;",
+                                       ";Embargoed\nstructure\n;"))
+        self.assertEqual(self.deposition.verify_coordinates(), [])
+
+    def test_no_file_is_distinguished_from_a_file_that_agrees(self):
+        with self.assertRaises(FileNotFoundError):
+            self.deposition.verify_coordinates()
