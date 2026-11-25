@@ -1,5 +1,7 @@
 # prepub-review
 
+[![tests](https://github.com/Aditya-galaxy/prepub-review/actions/workflows/ci.yml/badge.svg)](https://github.com/Aditya-galaxy/prepub-review/actions/workflows/ci.yml)
+
 **A structural biology deposition is confidential until its release date. This is a Django service
 that lets a journal's reviewers read one embargoed entry, for a limited time, and records every
 attempt to reach it.**
