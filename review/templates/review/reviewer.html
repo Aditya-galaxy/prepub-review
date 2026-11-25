@@ -1,0 +1,44 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pre-publication review access</title>
+<link rel="stylesheet" href="{% static 'review/style.css' %}">
+</head>
+<body>
+<main>
+  <h1>Pre-publication review access</h1>
+  <p class="lede">
+    Reviewers of a manuscript under consideration can use the token supplied by the journal to
+    read the deposited structure before it is released. Every access is recorded.
+  </p>
+
+  <section aria-labelledby="token-heading">
+    <h2 id="token-heading">Your review token</h2>
+    <form id="token-form" autocomplete="off">
+      <label for="token">Token</label>
+      <input type="password" id="token" name="token" required
+             placeholder="supplied by the journal" aria-describedby="token-help">
+      <p class="help" id="token-help">Held in this page only, and never written to storage.</p>
+      <button type="submit">Open</button>
+    </form>
+    <div id="session" class="panel" hidden></div>
+    <div id="error" class="panel error" role="alert" hidden></div>
+  </section>
+
+  <section aria-labelledby="entry-heading">
+    <h2 id="entry-heading">Entry</h2>
+    <div id="entry" class="panel" hidden></div>
+    <p id="entry-empty" class="help">Nothing open yet.</p>
+  </section>
+
+  <section aria-labelledby="public-heading">
+    <h2 id="public-heading">Released entries</h2>
+    <p class="help">Public, no token needed.</p>
+    <ul id="public-list"></ul>
+  </section>
+</main>
+<script src="{% static 'review/app.js' %}"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# A local stand-in for deployment: gunicorn in front of PostgreSQL, with the coordinate files on a
+# named volume rather than inside the image.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: prepub
+      POSTGRES_USER: prepub
+      POSTGRES_PASSWORD: prepub-local-only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prepub -d prepub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://prepub:prepub-local-only@db:5432/prepub
+      DJANGO_SECRET_KEY: local-only-not-a-real-secret
+      DJANGO_DEBUG: "false"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      PREPUB_TOKEN_PEPPER: local-only-pepper
+      PREPUB_CLIENT_SALT: local-only-salt
+      PREPUB_MEDIA_ROOT: /app/media
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             gunicorn prepub.wsgi:application --bind 0.0.0.0:8000 --workers 2 --access-logfile -"
+    ports:
+      - "8000:8000"
+    volumes:
+      - media:/app/media
+
+volumes:
+  pgdata:
+  media:
