@@ -201,12 +201,14 @@ class AccessRecord(models.Model):
     class Outcome(models.TextChoices):
         PUBLIC = "public", "Public entry, no token required"
         GRANTED = "granted", "Granted on a valid token"
+        GRANTED_DEPOSITOR = "granted_depositor", "Granted to the signed-in depositor"
         DENIED_NO_TOKEN = "denied_no_token", "Embargoed, no token presented"
         DENIED_UNKNOWN = "denied_unknown_token", "Token not recognised"
         DENIED_EXPIRED = "denied_expired", "Token expired"
         DENIED_REVOKED = "denied_revoked", "Token revoked"
         DENIED_EXHAUSTED = "denied_exhausted", "Token access limit reached"
         DENIED_WRONG_ENTRY = "denied_wrong_entry", "Token valid for a different entry"
+        DENIED_NOT_DEPOSITOR = "denied_not_depositor", "Signed in, but not this depositor"
         NOT_FOUND = "not_found", "No such entry"
 
     occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)

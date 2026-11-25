@@ -101,6 +101,50 @@
       });
   });
 
+  // Depositor sign-in. Whether anyone is signed in is not rendered into the page: it is
+  // discovered by asking the API, so the template stays a static file and there is one place
+  // that decides who may see what.
+  var SIGNIN_MESSAGES = {
+    ok: "Signed in.",
+    failed: "That sign-in could not be completed. Please try again.",
+    unknown: "That ORCID iD has no depositions here.",
+    unavailable: "ORCID sign-in is not configured on this server.",
+    out: "Signed out."
+  };
+
+  function showSigninNote() {
+    var value = new URLSearchParams(window.location.search).get("signin");
+    if (value && SIGNIN_MESSAGES[value]) {
+      show(el("signin-note"), escapeHtml(SIGNIN_MESSAGES[value]));
+    }
+  }
+
+  function loadMine() {
+    fetch("/api/mine/")
+      .then(function (response) {
+        if (response.status === 401) { return null; }
+        if (!response.ok) { throw new Error("Could not load your depositions"); }
+        return response.json();
+      })
+      .then(function (entries) {
+        if (entries === null) { return; }
+        el("signin-actions").innerHTML =
+          '<a class="button-link secondary" href="/auth/orcid/logout/">Sign out</a>';
+        var rows = entries.results || entries;
+        el("mine-list").innerHTML = rows.length
+          ? rows.map(function (entry) {
+              var tag = entry.embargoed ? ' <span class="tag">embargoed</span>' : "";
+              return "<li><code>" + escapeHtml(entry.accession) + "</code> &mdash; "
+                + escapeHtml(entry.title) + tag + "</li>";
+            }).join("")
+          : "<li>No depositions.</li>";
+      })
+      .catch(function (err) { show(el("signin-note"), escapeHtml(err.message)); });
+  }
+
+  showSigninNote();
+  loadMine();
+
   // The public list is fetched without a token, which is the point of it.
   fetch("/api/depositions/")
     .then(function (r) { return r.json(); })

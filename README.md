@@ -23,7 +23,9 @@ presenting a token that was issued for that exact entry, and only while the toke
 | Embargoed entry, token for a different entry | **404** |
 | Embargoed entry, its own valid token | 200 |
 | Any entry, expired, revoked or unknown token | 401 |
-| Embargoed entry in the public list | never, with or without a token |
+| Embargoed entry, its depositor signed in with ORCID | 200 |
+| Embargoed entry, a *different* depositor signed in | **404** |
+| Embargoed entry in the public list | never, for anyone |
 
 **The 404 is deliberate and is the most important decision here.** A 403 would confirm that the
 accession exists and is under embargo, and that is itself information about unpublished work: it
@@ -81,6 +83,8 @@ to a `postgresql://` URL and the same code uses PostgreSQL.
 | `GET /api/depositions/<accession>/` | One entry, subject to the table above. |
 | `GET /api/depositions/<accession>/coordinates/` | The coordinate file, same check applied again. |
 | `GET /api/session/` | What the presented token opens, when it expires, accesses left. |
+| `GET /api/mine/` | The signed-in depositor's own entries, embargoed included. |
+| `GET /auth/orcid/login/` \| `/callback/` \| `/logout/` | The ORCID sign-in flow. |
 
 Credentials go in `Authorization: Review <token>`.
 
@@ -91,6 +95,47 @@ curl -H "Authorization: Review $TOKEN" http://127.0.0.1:8000/api/depositions/11C
 **Tokens are issued through the admin and the `issue_token` command, not through this API.** Keeping
 the issuing path off the reviewer-facing surface means a flaw in the read path cannot be turned
 into a way to mint access.
+
+## Two principals, two mechanisms
+
+A reviewer and a depositor are different people with different claims on an entry, so they
+authenticate differently, which is how a real deposition system works.
+
+A **reviewer** holds a bearer token issued by the journal. They are deliberately anonymous: the
+token names the manuscript, not the person.
+
+A **depositor** is a named person who already has an ORCID iD, and signs in with it to see their
+own work, embargoed included. `review/orcid_oauth.py` implements the OAuth2 authorisation-code
+flow with OpenID Connect, against **ORCID's sandbox by default**, because reaching the real
+registry should be a deliberate act rather than the result of a forgotten variable.
+
+```bash
+export ORCID_CLIENT_ID=APP-XXXXXXXXXXXXXXXX ORCID_CLIENT_SECRET=...
+export ORCID_REDIRECT_URI=http://127.0.0.1:8000/auth/orcid/callback/
+```
+
+What the flow checks, and why each one is there:
+
+- **`state`**, random and single use. It is removed from the session before anything else happens,
+  so a replayed callback fails. Without it, any site could start a sign-in in a visitor's browser.
+- **`nonce`**, carried into the `id_token` and compared on return, so an `id_token` captured from
+  a different login cannot be replayed into this one.
+- **The `id_token` signature**, verified against ORCID's published JWKS with issuer, audience and
+  expiry all enforced.
+- **Agreement between the two sources of the iD.** The token response and the verified `id_token`
+  must name the same person. If they disagree the sign-in is refused, rather than resolved in
+  favour of whichever is more convenient.
+- **The session key is cycled** on sign-in, so a session fixed beforehand is not the one that ends
+  up carrying an identity.
+
+Signing in creates nothing. A person becomes a depositor by depositing, so an ORCID iD with no
+depositions is told exactly that and no row is written. Every sign-in failure redirects to the
+same place with the same message; the reason is logged for the operator but not shown, because
+naming the failing step helps someone probing the flow more than it helps a depositor who needs
+to try again.
+
+The session holds the iD, not a row id, and the row is resolved on every request, so removing a
+depositor takes effect at once rather than whenever their session expires.
 
 ## Checking a file against its record
 
@@ -170,11 +215,14 @@ the same count and overshoot the limit.
 .venv/bin/python manage.py test review
 ```
 
-48 tests, covering the embargo table above, the token lifecycle (expiry, revocation, access
+68 tests, covering the embargo table above, the token lifecycle (expiry, revocation, access
 limits, unknown tokens), the ORCID check digit, and the audit trail: that refusals are recorded,
 that the plaintext token never reaches the database, that the client address is not stored in
 clear, that records cannot be modified or deleted either one at a time or in bulk, and that the trail
-survives deletion of the token it refers to. The mmCIF tests use a hand-written fragment,
+survives deletion of the token it refers to. The ORCID tests sign a real RS256 `id_token` with a throwaway key and check that a wrong
+subject, a wrong nonce, a wrong audience, a mismatched `state` and a replayed callback are
+each refused, and that signing in opens your own embargoed entry and not anyone else's. The
+mmCIF tests use a hand-written fragment,
 labelled as fake, that exercises the syntax quirks above, and check that each kind of
 record-versus-file mismatch is caught rather than only that a matching file passes.
 
@@ -189,11 +237,14 @@ coordinates themselves, which is a much larger job. Real
 pre-publication access at the wwPDB is coordinated across several independent sites, and nothing
 here addresses that.
 
-Authentication is a bearer token, so anyone holding it has access. That is the right shape for
-reviewers, who are anonymous to the depositor by design, but it means a leaked token is live until
-revoked or expired. The access limit and the short default lifetime narrow that window rather than
-closing it. ORCID sign-in, which would let a journal tie a token to an identified reviewer where
-that is wanted, is in the data model but not implemented.
+Reviewer authentication is a bearer token, so anyone holding it has access. That is the right
+shape for reviewers, who are anonymous to the depositor by design, but it means a leaked token
+is live until revoked or expired. The access limit and the short default lifetime narrow that
+window rather than closing it.
+
+ORCID sign-in covers depositors but not reviewers. A journal that wanted to tie a token to an
+identified reviewer could reuse the same flow, and the token model would need a nullable link
+to a person. It has been left out because anonymous review is the normal case.
 
 The audit trail is append-only against ordinary application mistakes, not against someone with
 direct database access. Making it tamper-evident would need hash chaining or an append-only store.

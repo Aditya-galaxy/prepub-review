@@ -392,3 +392,235 @@ class CoordinateVerificationTests(TestCase):
     def test_no_file_is_distinguished_from_a_file_that_agrees(self):
         with self.assertRaises(FileNotFoundError):
             self.deposition.verify_coordinates()
+
+
+# --- ORCID sign-in ----------------------------------------------------------------------------
+
+ORCID_SETTINGS = dict(
+    ORCID_BASE="https://sandbox.orcid.org",
+    ORCID_CLIENT_ID="APP-TEST0000000000",
+    ORCID_CLIENT_SECRET="test-secret",
+    ORCID_REDIRECT_URI="http://testserver/auth/orcid/callback/",
+)
+
+DEPOSITOR_ORCID = "0000-0002-1694-233X"
+OTHER_ORCID = "0000-0003-1567-1643"
+
+
+def _rsa_keypair():
+    """A throwaway key, so the id_token tests verify a real RS256 signature."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption())
+    return private, pem
+
+
+@override_settings(**ORCID_SETTINGS)
+class ORCIDFlowTests(TestCase):
+    """The flow itself, with the single network call replaced."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.private_key, cls.private_pem = _rsa_keypair()
+
+    def setUp(self):
+        from django.contrib.sessions.backends.db import SessionStore
+        self.session = SessionStore()
+
+    def start(self):
+        from .orcid_oauth import authorize_url
+        return authorize_url(self.session)
+
+    def id_token(self, sub=DEPOSITOR_ORCID, nonce=None, audience=None):
+        import time
+        import jwt as pyjwt
+        claims = {
+            "iss": "https://sandbox.orcid.org",
+            "sub": sub,
+            "aud": audience or ORCID_SETTINGS["ORCID_CLIENT_ID"],
+            "exp": int(time.time()) + 600,
+            "iat": int(time.time()),
+            "nonce": nonce,
+        }
+        return pyjwt.encode(claims, self.private_pem, algorithm="RS256")
+
+    def complete(self, payload, state=None, patch_keys=True):
+        from unittest import mock
+
+        from . import orcid_oauth
+        state = state if state is not None else self.session.get(orcid_oauth.STATE_KEY)
+        key_holder = mock.Mock(key=self.private_key.public_key())
+        with mock.patch.object(orcid_oauth, "exchange_code", return_value=payload), \
+             mock.patch("jwt.PyJWKClient") as jwks:
+            jwks.return_value.get_signing_key_from_jwt.return_value = key_holder
+            return orcid_oauth.complete(self.session, "any-code", state)
+
+    def test_authorize_url_carries_the_right_parameters(self):
+        from urllib.parse import parse_qs, urlparse
+        query = parse_qs(urlparse(self.start()).query)
+        self.assertEqual(query["client_id"], [ORCID_SETTINGS["ORCID_CLIENT_ID"]])
+        self.assertEqual(query["response_type"], ["code"])
+        self.assertIn("openid", query["scope"][0])
+        self.assertTrue(query["state"][0])
+        self.assertTrue(query["nonce"][0])
+
+    def test_sandbox_is_the_default_target(self):
+        """Reaching the real registry must be a deliberate act."""
+        self.assertTrue(self.start().startswith("https://sandbox.orcid.org/oauth/authorize"))
+
+    def test_login_without_a_client_id_is_refused(self):
+        from .orcid_oauth import ORCIDAuthError, authorize_url
+        with override_settings(ORCID_CLIENT_ID=""):
+            with self.assertRaises(ORCIDAuthError):
+                authorize_url(self.session)
+
+    def test_a_valid_exchange_returns_the_id(self):
+        self.start()
+        from . import orcid_oauth
+        nonce = self.session[orcid_oauth.NONCE_KEY]
+        orcid = self.complete({"orcid": DEPOSITOR_ORCID, "id_token": self.id_token(nonce=nonce)})
+        self.assertEqual(orcid, DEPOSITOR_ORCID)
+
+    def test_mismatched_state_is_refused(self):
+        """Without this check, any site could trigger a sign-in in a visitor's browser."""
+        from .orcid_oauth import ORCIDAuthError
+        self.start()
+        with self.assertRaises(ORCIDAuthError):
+            self.complete({"orcid": DEPOSITOR_ORCID}, state="not-the-state")
+
+    def test_a_replayed_callback_is_refused(self):
+        """State is single use: it is removed from the session on first use."""
+        from .orcid_oauth import ORCIDAuthError
+        self.start()
+        from . import orcid_oauth
+        state = self.session[orcid_oauth.STATE_KEY]
+        self.complete({"orcid": DEPOSITOR_ORCID}, state=state)
+        with self.assertRaises(ORCIDAuthError):
+            self.complete({"orcid": DEPOSITOR_ORCID}, state=state)
+
+    def test_a_response_with_no_id_is_refused(self):
+        from .orcid_oauth import ORCIDAuthError
+        self.start()
+        with self.assertRaises(ORCIDAuthError):
+            self.complete({"access_token": "x"})
+
+    def test_an_id_token_for_a_different_subject_is_refused(self):
+        """The decisive check: the signed token and the token response must name one person."""
+        from .orcid_oauth import ORCIDAuthError
+        self.start()
+        from . import orcid_oauth
+        nonce = self.session[orcid_oauth.NONCE_KEY]
+        with self.assertRaises(ORCIDAuthError):
+            self.complete({"orcid": DEPOSITOR_ORCID,
+                           "id_token": self.id_token(sub=OTHER_ORCID, nonce=nonce)})
+
+    def test_an_id_token_with_the_wrong_nonce_is_refused(self):
+        """A replayed id_token from another login must not be accepted."""
+        from .orcid_oauth import ORCIDAuthError
+        self.start()
+        with self.assertRaises(ORCIDAuthError):
+            self.complete({"orcid": DEPOSITOR_ORCID,
+                           "id_token": self.id_token(nonce="some-other-nonce")})
+
+    def test_an_id_token_for_another_audience_is_refused(self):
+        from .orcid_oauth import ORCIDAuthError
+        self.start()
+        from . import orcid_oauth
+        nonce = self.session[orcid_oauth.NONCE_KEY]
+        with self.assertRaises(ORCIDAuthError):
+            self.complete({"orcid": DEPOSITOR_ORCID,
+                           "id_token": self.id_token(nonce=nonce, audience="APP-SOMEONEELSE")})
+
+
+@override_settings(**ORCID_SETTINGS)
+class DepositorAccessTests(EmbargoBase):
+    """What signing in actually grants, which is a third route to embargoed data."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = Depositor.objects.create(name="Someone Else", orcid=OTHER_ORCID)
+        self.others_entry = Deposition.objects.create(
+            accession="9QQQ", title="Another embargoed structure", depositor=self.other,
+            deposited_on=timezone.localdate(),
+            release_on=timezone.localdate() + timedelta(days=60))
+
+    def sign_in(self, orcid=DEPOSITOR_ORCID):
+        from .orcid_oauth import SESSION_ORCID
+        session = self.client.session
+        session[SESSION_ORCID] = orcid
+        session.save()
+
+    def test_depositor_sees_their_own_embargoed_entry(self):
+        self.sign_in()
+        response = self.get("/api/depositions/9XYZ/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(AccessRecord.objects.first().outcome,
+                         AccessRecord.Outcome.GRANTED_DEPOSITOR)
+
+    def test_depositor_cannot_see_someone_elses_embargoed_entry(self):
+        """Signing in is not a skeleton key, and the refusal is still a 404."""
+        self.sign_in()
+        self.assertEqual(self.get("/api/depositions/9QQQ/").status_code, 404)
+        self.assertEqual(AccessRecord.objects.first().outcome,
+                         AccessRecord.Outcome.DENIED_NOT_DEPOSITOR)
+
+    def test_public_list_still_hides_embargoed_entries_from_their_own_depositor(self):
+        self.sign_in()
+        accessions = [row["accession"] for row in self.get("/api/depositions/").json()]
+        self.assertNotIn("9XYZ", accessions)
+
+    def test_mine_returns_own_entries_including_embargoed(self):
+        self.sign_in()
+        accessions = [row["accession"] for row in self.get("/api/mine/").json()]
+        self.assertIn("9XYZ", accessions)
+        self.assertIn("1ABC", accessions)
+        self.assertNotIn("9QQQ", accessions)
+
+    def test_mine_requires_signing_in(self):
+        self.assertEqual(self.get("/api/mine/").status_code, 401)
+
+    def test_logout_ends_the_access(self):
+        self.sign_in()
+        self.assertEqual(self.get("/api/depositions/9XYZ/").status_code, 200)
+        self.client.get("/auth/orcid/logout/")
+        self.assertEqual(self.get("/api/depositions/9XYZ/").status_code, 404)
+
+    def test_deleting_the_depositor_revokes_access_immediately(self):
+        """The session holds an iD, not a row id, so the row is resolved on every request."""
+        self.sign_in()
+        self.assertEqual(self.get("/api/depositions/9XYZ/").status_code, 200)
+        self.embargoed.depositor = self.other
+        self.embargoed.save(update_fields=["depositor"])
+        self.assertEqual(self.get("/api/depositions/9XYZ/").status_code, 404)
+
+    def test_a_signed_in_id_with_no_depositor_row_grants_nothing(self):
+        self.sign_in(orcid="0009-0000-9103-975X")
+        self.assertEqual(self.get("/api/depositions/9XYZ/").status_code, 404)
+        self.assertEqual(self.get("/api/mine/").status_code, 401)
+
+    def test_callback_with_an_unknown_id_does_not_create_a_depositor(self):
+        """Depositing makes someone a depositor. Signing in must not."""
+        from unittest import mock
+
+        from . import orcid_oauth, views
+        before = Depositor.objects.count()
+        with mock.patch.object(views.orcid_oauth, "complete", return_value="0009-0000-9103-975X"):
+            response = self.client.get("/auth/orcid/callback/?code=x&state=y")
+        self.assertEqual(Depositor.objects.count(), before)
+        self.assertNotIn(orcid_oauth.SESSION_ORCID, self.client.session)
+        self.assertIn("signin=unknown", response.url)
+
+    def test_callback_failure_reveals_nothing_about_which_step_failed(self):
+        from unittest import mock
+
+        from . import views
+        with mock.patch.object(views.orcid_oauth, "complete",
+                               side_effect=views.orcid_oauth.ORCIDAuthError("state mismatch")):
+            response = self.client.get("/auth/orcid/callback/?code=x&state=y")
+        self.assertIn("signin=failed", response.url)
+        self.assertNotIn("state", response.url)
