@@ -58,6 +58,12 @@ button:hover { filter: brightness(1.08); }
   font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
   background: var(--warn-bg); color: var(--warn-ink); border: 1px solid var(--warn-line);
 }
+.button-link {
+  display: inline-block; margin-top: .4rem; padding: .55rem 1.1rem; font-weight: 600;
+  color: #fff; background: var(--accent); border-radius: 6px; text-decoration: none;
+}
+.button-link:hover { filter: brightness(1.08); }
+.button-link.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
 ul { padding-left: 1.1rem; }
 li { margin: .25rem 0; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }

@@ -25,6 +25,14 @@ TOKEN_PEPPER = os.environ.get("PREPUB_TOKEN_PEPPER", "dev-only-token-pepper")
 # Client addresses are hashed with this before storage. See review/audit.py.
 CLIENT_SALT = os.environ.get("PREPUB_CLIENT_SALT", "dev-only-client-salt")
 
+# ORCID sign-in for depositors. The default is the SANDBOX: pointing this at the real registry
+# has to be a deliberate act, not something that happens because a variable was forgotten.
+ORCID_BASE = os.environ.get("ORCID_BASE", "https://sandbox.orcid.org")
+ORCID_CLIENT_ID = os.environ.get("ORCID_CLIENT_ID", "")
+ORCID_CLIENT_SECRET = os.environ.get("ORCID_CLIENT_SECRET", "")
+ORCID_REDIRECT_URI = os.environ.get(
+    "ORCID_REDIRECT_URI", "http://127.0.0.1:8000/auth/orcid/callback/")
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
