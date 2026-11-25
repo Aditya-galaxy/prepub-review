@@ -36,3 +36,15 @@ class SessionSerializer(serializers.Serializer):
     issued_for = serializers.CharField()
     expires_at = serializers.DateTimeField()
     accesses_remaining = serializers.IntegerField(allow_null=True)
+
+
+class DepositUploadSerializer(serializers.Serializer):
+    """What a depositor sends. Note what is NOT here.
+
+    No accession, title, method or resolution: those are read out of the file, so the record and
+    the file cannot disagree at the moment the record is made. The only thing the depositor
+    chooses is when the embargo ends.
+    """
+
+    coordinates = serializers.FileField()
+    release_on = serializers.DateField()
